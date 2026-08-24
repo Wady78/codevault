@@ -1,33 +1,90 @@
-import { useAuth } from "@/_core/hooks/useAuth";
 import { Button } from "@/components/ui/button";
-import { Loader2 } from "lucide-react";
-import { Streamdown } from 'streamdown';
+import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
+import { trpc } from "@/lib/trpc";
+import { formatDistanceToNow } from "date-fns";
+import { Check, ChevronLeft, Clipboard, Code2, Edit3, FileCode2, Plus, Search, Star, Trash2, X } from "lucide-react";
+import { useMemo, useRef, useState } from "react";
+import { toast } from "sonner";
 
-/**
- * All content in this page are only for example, replace with your own feature implementation
- * When building pages, remember your instructions in Frontend Workflow, Frontend Best Practices, Design Guide and Common Pitfalls
- */
-export default function Home() {
-  // The useAuth hook provides authentication state.
-  // To implement login/logout, call logout(), or start login from an event
-  // handler: onClick={() => startLogin()} (imported from "@/const"). Never call
-  // startLogin() during render (no href={startLogin()}) — it mints a one-time
-  // nonce cookie and must run only at the moment of navigation.
-  let { user, loading, error, isAuthenticated, logout } = useAuth();
+const languages = ["TypeScript", "JavaScript", "Python", "SQL", "CSS", "HTML", "Bash", "Go", "Rust", "Other"];
+const categories = ["Frontend", "Backend", "Database", "DevOps", "Utilities", "Patterns", "Other"];
 
-  // If theme is switchable in App.tsx, we can implement theme toggling like this:
-  // const { theme, toggleTheme } = useTheme();
+type FormState = { title: string; language: string; category: string; tags: string; notes: string; code: string };
+const blankForm: FormState = { title: "", language: "TypeScript", category: "Utilities", tags: "", notes: "", code: "" };
 
-  return (
-    <div className="min-h-screen flex flex-col">
-      <main>
-        {/* Example: lucide-react for icons */}
-        <Loader2 className="animate-spin" />
-        Example Page
-        {/* Example: Streamdown for markdown rendering */}
-        <Streamdown>Any **markdown** content</Streamdown>
-        <Button variant="default">Example Button</Button>
-      </main>
-    </div>
-  );
+function highlightCode(code: string) {
+  const escaped = code.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const protectedParts: string[] = [];
+  const protect = (html: string) => { const index = protectedParts.push(html) - 1; return `__VAULT_TOKEN_${index}__`; };
+  const prepared = escaped
+    .replace(/(\/\/.*|#.*)$/gm, match => protect(`<span class="tok-comment">${match}</span>`))
+    .replace(/(["'`])(?:(?=(\\?))\\2.)*?\\1/g, match => protect(`<span class="tok-string">${match}</span>`));
+  const colored = prepared
+    .replace(/\\b(const|let|var|function|return|if|else|for|while|import|from|export|async|await|new|class|def|SELECT|FROM|WHERE|INSERT|UPDATE)\\b/g, '<span class="tok-keyword">$1</span>')
+    .replace(/\\b(true|false|null|undefined|None)\\b/g, '<span class="tok-value">$1</span>');
+  return colored.replace(/__VAULT_TOKEN_(\\d+)__/g, (_, index) => protectedParts[Number(index)] ?? "");
 }
+
+function CodePreview({ code }: { code: string }) {
+  return <pre className="code-surface overflow-auto p-5 text-[12px] leading-6"><code dangerouslySetInnerHTML={{ __html: highlightCode(code) }} /></pre>;
+}
+
+function CodeEditor({ value, onChange }: { value: string; onChange: (value: string) => void }) {
+  const backdropRef = useRef<HTMLPreElement>(null);
+  const syncScroll = (event: React.UIEvent<HTMLTextAreaElement>) => { if (backdropRef.current) { backdropRef.current.scrollTop = event.currentTarget.scrollTop; backdropRef.current.scrollLeft = event.currentTarget.scrollLeft; } };
+  return <div className="relative min-h-[480px] overflow-hidden bg-[#17243a]"><pre ref={backdropRef} aria-hidden="true" className="pointer-events-none absolute inset-0 m-0 overflow-hidden whitespace-pre-wrap break-words p-5 font-mono text-[12px] leading-6 text-[#d8e5f5]"><code dangerouslySetInnerHTML={{ __html: `${highlightCode(value)}\n` }} /></pre><textarea value={value} onChange={event => onChange(event.target.value)} onScroll={syncScroll} placeholder="Paste or write your code here..." spellCheck={false} aria-label="Code editor" className="relative min-h-[480px] w-full resize-y overflow-auto bg-transparent p-5 font-mono text-[12px] leading-6 text-transparent caret-[#d8e5f5] outline-none placeholder:text-[#637692] selection:bg-[#52729d]/40" /></div>;
+}
+
+export default function Home() {
+  const [search, setSearch] = useState("");
+  const [language, setLanguage] = useState("all");
+  const [category, setCategory] = useState("all");
+  const [tag, setTag] = useState("all");
+  const [favoritesOnly, setFavoritesOnly] = useState(false);
+  const [selectedId, setSelectedId] = useState<number | null>(null);
+  const [isCreating, setIsCreating] = useState(false);
+  const [editing, setEditing] = useState(false);
+  const [form, setForm] = useState<FormState>(blankForm);
+  const utils = trpc.useUtils();
+  const snippetsQuery = trpc.snippets.list.useQuery({ search: search || undefined });
+  const createMutation = trpc.snippets.create.useMutation({ onSuccess: () => { utils.snippets.list.invalidate(); setIsCreating(false); toast.success("Snippet saved to your vault"); } });
+  const updateMutation = trpc.snippets.update.useMutation({ onSuccess: () => { utils.snippets.list.invalidate(); setEditing(false); toast.success("Snippet updated"); } });
+  const favoriteMutation = trpc.snippets.toggleFavorite.useMutation({ onSuccess: () => utils.snippets.list.invalidate() });
+  const deleteMutation = trpc.snippets.remove.useMutation({ onSuccess: () => { utils.snippets.list.invalidate(); setSelectedId(null); toast.success("Snippet deleted"); } });
+
+  const snippets = snippetsQuery.data ?? [];
+  const allTags = useMemo(() => Array.from(new Set(snippets.flatMap(item => item.tags.split(",").map(value => value.trim()).filter(Boolean)))).sort(), [snippets]);
+  const filtered = useMemo(() => snippets.filter(item => (language === "all" || item.language === language) && (category === "all" || item.category === category) && (tag === "all" || item.tags.split(",").map(value => value.trim()).includes(tag)) && (!favoritesOnly || item.favorite)), [snippets, language, category, tag, favoritesOnly]);
+  const selected = snippets.find(item => item.id === selectedId) ?? null;
+
+  const openCreate = () => { setForm(blankForm); setIsCreating(true); setEditing(false); setSelectedId(null); };
+  const openEdit = () => { if (!selected) return; setForm({ title: selected.title, language: selected.language, category: selected.category, tags: selected.tags, notes: selected.notes ?? "", code: selected.code }); setEditing(true); };
+  const saveSnippet = () => {
+    const payload = { ...form, tags: form.tags.split(",").map(value => value.trim()).filter(Boolean), notes: form.notes || null };
+    if (!payload.title || !payload.code) { toast.error("Add a title and code before saving"); return; }
+    if (editing && selected) updateMutation.mutate({ id: selected.id, data: payload });
+    else createMutation.mutate(payload);
+  };
+  const copyCode = async (code: string) => { await navigator.clipboard.writeText(code); toast.success("Code copied to clipboard"); };
+
+  if (isCreating || editing) return <EditorView form={form} setForm={setForm} onCancel={() => { setIsCreating(false); setEditing(false); }} onSave={saveSnippet} saving={createMutation.isPending || updateMutation.isPending} editing={editing} />;
+
+  return <div className="mx-auto max-w-[1440px]">
+    <header className="mb-8 flex flex-col gap-5 md:flex-row md:items-end md:justify-between"><div><div className="mb-3 flex items-center gap-2 text-[#8792a3]"><Code2 className="h-4 w-4" /><span className="font-mono text-[11px] font-bold uppercase tracking-[0.18em]">Private workspace</span></div><h1 className="text-3xl font-semibold tracking-[-0.04em] text-[#182236] sm:text-4xl">Your code, in its place.</h1><p className="mt-2 text-sm text-[#7c8798]">A quiet, searchable home for the snippets worth keeping.</p></div><Button onClick={openCreate} className="h-11 rounded-xl bg-[#1b2b45] px-5 shadow-[0_8px_18px_rgba(27,43,69,0.16)] hover:bg-[#263b5b]"><Plus className="mr-2 h-4 w-4" />New snippet</Button></header>
+    <div className="mb-6 grid gap-3 sm:grid-cols-3"><Stat label="Total snippets" value={snippets.length} icon={<FileCode2 className="h-4 w-4" />} /><Stat label="Favorites" value={snippets.filter(item => item.favorite).length} icon={<Star className="h-4 w-4" />} /><Stat label="Languages" value={new Set(snippets.map(item => item.language)).size} icon={<Code2 className="h-4 w-4" />} /></div>
+    <section className="mb-6 rounded-2xl border border-[#e3e7ed] bg-white p-3 shadow-[0_8px_30px_rgba(28,36,52,0.04)]"><div className="flex flex-col gap-3 lg:flex-row"><div className="relative flex-1"><Search className="absolute left-3.5 top-3 h-4 w-4 text-[#9aa4b3]" /><Input value={search} onChange={event => setSearch(event.target.value)} placeholder="Search snippets, tags, notes, or code..." className="h-10 rounded-xl border-[#e8ebf0] bg-[#fafbfc] pl-10 text-sm shadow-none focus-visible:ring-[#c6d5eb]" /></div><div className="grid grid-cols-2 gap-3 sm:grid-cols-4 lg:flex"><FilterSelect label="Language" value={language} onChange={setLanguage} options={languages} /><FilterSelect label="Category" value={category} onChange={setCategory} options={categories} /><FilterSelect label="Tag" value={tag} onChange={setTag} options={allTags} /><button onClick={() => setFavoritesOnly(!favoritesOnly)} className={`flex h-10 items-center justify-center gap-2 rounded-xl border px-3 text-xs font-semibold transition-colors ${favoritesOnly ? "border-[#c7d7ee] bg-[#e8eef8] text-[#355a86]" : "border-[#e8ebf0] text-[#7d899a] hover:bg-[#f7f8fa]"}`}><Star className={`h-3.5 w-3.5 ${favoritesOnly ? "fill-current" : ""}`} />Favorites</button></div></div></section>
+    <div className="mb-4 flex items-center justify-between"><p className="text-xs font-medium text-[#8792a3]">{filtered.length} {filtered.length === 1 ? "snippet" : "snippets"}</p>{(search || language !== "all" || category !== "all" || tag !== "all" || favoritesOnly) && <button onClick={() => { setSearch(""); setLanguage("all"); setCategory("all"); setTag("all"); setFavoritesOnly(false); }} className="text-xs font-semibold text-[#55759e] hover:text-[#1b2b45]">Clear filters</button>}</div>
+    {snippetsQuery.isLoading ? <LoadingGrid /> : snippetsQuery.isError ? <StateCard title="We couldn't load your vault" body="Please try again in a moment." action={<Button variant="outline" onClick={() => snippetsQuery.refetch()}>Retry</Button>} /> : filtered.length === 0 ? <StateCard title={snippets.length ? "No snippets match those filters" : "Your vault is ready"} body={snippets.length ? "Try broadening your search or clearing a filter." : "Start with the code you reach for most often."} action={<Button onClick={snippets.length ? () => { setSearch(""); setLanguage("all"); setCategory("all"); setTag("all"); setFavoritesOnly(false); } : openCreate} className="rounded-xl bg-[#1b2b45]">{snippets.length ? "Clear filters" : "Create your first snippet"}</Button>} /> : <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">{filtered.map(item => <SnippetCard key={item.id} item={item} onOpen={() => setSelectedId(item.id)} onFavorite={() => favoriteMutation.mutate({ id: item.id, favorite: !item.favorite })} />)}</div>}
+    {selected && <DetailDrawer item={selected} onClose={() => setSelectedId(null)} onEdit={openEdit} onDelete={() => { if (confirm("Delete this snippet permanently?")) deleteMutation.mutate({ id: selected.id }); }} onCopy={() => copyCode(selected.code)} onFavorite={() => favoriteMutation.mutate({ id: selected.id, favorite: !selected.favorite })} />}
+  </div>;
+}
+
+function Stat({ label, value, icon }: { label: string; value: number; icon: React.ReactNode }) { return <div className="rounded-2xl border border-[#e3e7ed] bg-white p-4 shadow-[0_8px_30px_rgba(28,36,52,0.03)]"><div className="mb-3 flex items-center justify-between text-[#8a95a5]"><span className="text-xs font-medium">{label}</span><span className="flex h-7 w-7 items-center justify-center rounded-lg bg-[#f0f4fa] text-[#57739b]">{icon}</span></div><p className="text-2xl font-semibold tracking-tight text-[#1b2b45]">{value}</p></div>; }
+function FilterSelect({ label, value, onChange, options }: { label: string; value: string; onChange: (value: string) => void; options: string[] }) { return <select aria-label={label} value={value} onChange={event => onChange(event.target.value)} className="h-10 min-w-0 rounded-xl border border-[#e8ebf0] bg-[#fafbfc] px-3 text-xs font-medium text-[#69778b] outline-none focus:border-[#b9cce7]"> <option value="all">{label}</option>{options.map(option => <option key={option} value={option}>{option}</option>)}</select>; }
+function SnippetCard({ item, onOpen, onFavorite }: { item: any; onOpen: () => void; onFavorite: () => void }) { return <article className="group cursor-pointer rounded-2xl border border-[#e3e7ed] bg-white p-5 shadow-[0_8px_30px_rgba(28,36,52,0.03)] transition-all duration-200 hover:-translate-y-0.5 hover:border-[#ccd8e7] hover:shadow-[0_14px_35px_rgba(28,36,52,0.08)]" onClick={onOpen}><div className="mb-4 flex items-start justify-between gap-3"><div className="flex min-w-0 items-center gap-2"><span className="rounded-lg bg-[#edf3fb] px-2 py-1 font-mono text-[10px] font-bold uppercase tracking-wide text-[#4f6e96]">{item.language}</span><span className="truncate text-[11px] text-[#99a2af]">{item.category}</span></div><button aria-label={item.favorite ? "Remove from favorites" : "Add to favorites"} onClick={event => { event.stopPropagation(); onFavorite(); }} className="rounded-lg p-1 text-[#b3bcc8] transition-colors hover:bg-[#f4f6f9] hover:text-[#d39b32]"><Star className={`h-4 w-4 ${item.favorite ? "fill-[#e2aa3b] text-[#e2aa3b]" : ""}`} /></button></div><h2 className="mb-2 truncate text-base font-semibold tracking-tight text-[#26364e]">{item.title}</h2><p className="mb-5 line-clamp-2 min-h-10 text-xs leading-5 text-[#8994a5]">{item.notes || "No notes added to this snippet."}</p><div className="mb-5 flex min-h-5 flex-wrap gap-1.5">{item.tags.split(",").filter(Boolean).slice(0, 3).map((tag: string) => <span key={tag} className="rounded-md bg-[#f5f6f8] px-2 py-1 text-[10px] text-[#7b8798]">#{tag.trim()}</span>)}</div><div className="flex items-center justify-between border-t border-[#f0f2f5] pt-3 text-[10px] text-[#a0a9b6]"><span>{formatDistanceToNow(new Date(item.updatedAt), { addSuffix: true })}</span><span className="font-mono text-[#aeb7c3]">{item.code.split("\n").length} lines</span></div></article>; }
+function LoadingGrid() { return <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">{[1, 2, 3].map(item => <div key={item} className="h-56 animate-pulse rounded-2xl border border-[#e3e7ed] bg-white" />)}</div>; }
+function StateCard({ title, body, action }: { title: string; body: string; action: React.ReactNode }) { return <div className="relative overflow-hidden rounded-2xl border border-dashed border-[#cfd8e4] bg-white px-6 py-16 text-center"><div className="pointer-events-none absolute inset-0 opacity-60 [background-image:linear-gradient(#edf1f6_1px,transparent_1px),linear-gradient(90deg,#edf1f6_1px,transparent_1px)] [background-size:28px_28px] [mask-image:linear-gradient(to_bottom,black,transparent_82%)]" /><div className="relative"><div className="mx-auto mb-5 flex h-14 w-14 items-center justify-center rounded-2xl bg-[#1b2b45] text-white shadow-[0_10px_20px_rgba(27,43,69,0.18)]"><div className="relative"><FileCode2 className="h-6 w-6" /><span className="absolute -right-2 -top-2 h-2 w-2 rounded-full bg-[#82a9d8]" /></div></div><p className="mb-2 font-mono text-[10px] font-bold uppercase tracking-[0.2em] text-[#8b95a5]">PRIVATE ARCHIVE / 001</p><h2 className="text-xl font-semibold tracking-tight text-[#26364e]">{title === "Your vault is ready" ? "Your private archive is ready" : title}</h2><p className="mx-auto mt-2 max-w-sm text-sm leading-6 text-[#8994a5]">{title === "Your vault is ready" ? "Save the reusable patterns, queries, and fixes you trust. They’ll be here when the next project calls." : body}</p><div className="mt-7">{action}</div></div></div>; }
+function EditorView({ form, setForm, onCancel, onSave, saving, editing }: { form: FormState; setForm: React.Dispatch<React.SetStateAction<FormState>>; onCancel: () => void; onSave: () => void; saving: boolean; editing: boolean }) { const update = (key: keyof FormState, value: string) => setForm(current => ({ ...current, [key]: value })); return <div className="mx-auto max-w-6xl"><div className="mb-7 flex items-center justify-between"><div><button onClick={onCancel} className="mb-3 flex items-center gap-1 text-xs font-semibold text-[#7b8798] hover:text-[#1b2b45]"><ChevronLeft className="h-4 w-4" />Back to vault</button><h1 className="text-3xl font-semibold tracking-[-0.04em] text-[#182236]">{editing ? "Edit snippet" : "New snippet"}</h1><p className="mt-1 text-sm text-[#7c8798]">Capture the context that makes this code reusable.</p></div><div className="flex gap-2"><Button variant="outline" onClick={onCancel} className="rounded-xl border-[#dfe5ed]">Cancel</Button><Button onClick={onSave} disabled={saving} className="rounded-xl bg-[#1b2b45] hover:bg-[#263b5b]">{saving ? "Saving..." : "Save snippet"}</Button></div></div><div className="grid gap-5 lg:grid-cols-[0.8fr_1.2fr]"><section className="rounded-2xl border border-[#e3e7ed] bg-white p-5 shadow-[0_8px_30px_rgba(28,36,52,0.03)]"><div className="space-y-5"><Field label="Title"><Input value={form.title} onChange={event => update("title", event.target.value)} placeholder="e.g. Debounced search hook" className="rounded-xl border-[#e6eaf0] bg-[#fafbfc]" /></Field><div className="grid gap-4 sm:grid-cols-2"><Field label="Language"><FilterSelect label="Language" value={form.language} onChange={value => update("language", value)} options={languages} /></Field><Field label="Category"><FilterSelect label="Category" value={form.category} onChange={value => update("category", value)} options={categories} /></Field></div><Field label="Tags" hint="Separate tags with commas"><Input value={form.tags} onChange={event => update("tags", event.target.value)} placeholder="react, hooks, performance" className="rounded-xl border-[#e6eaf0] bg-[#fafbfc]" /></Field><Field label="Notes"><Textarea value={form.notes} onChange={event => update("notes", event.target.value)} placeholder="What does this solve? Any context for future you?" className="min-h-32 resize-none rounded-xl border-[#e6eaf0] bg-[#fafbfc]" /></Field></div></section><section className="overflow-hidden rounded-2xl border border-[#263b5b] bg-[#17243a] shadow-[0_14px_40px_rgba(27,43,69,0.15)]"><div className="flex items-center justify-between border-b border-white/10 px-5 py-3"><div className="flex items-center gap-2"><span className="h-2 w-2 rounded-full bg-[#6c9bd2]" /><span className="font-mono text-[11px] font-semibold text-[#b8cbe4]">CODE EDITOR</span></div><span className="font-mono text-[10px] text-[#7286a4]">{form.code.split("\n").length} lines</span></div><CodeEditor value={form.code} onChange={value => update("code", value)} /></section></div></div>; }
+function Field({ label, hint, children }: { label: string; hint?: string; children: React.ReactNode }) { return <label className="block"><span className="mb-2 block text-xs font-semibold text-[#526177]">{label}{hint && <span className="ml-2 font-normal text-[#a0a9b6]">{hint}</span>}</span>{children}</label>; }
+function DetailDrawer({ item, onClose, onEdit, onDelete, onCopy, onFavorite }: { item: any; onClose: () => void; onEdit: () => void; onDelete: () => void; onCopy: () => void; onFavorite: () => void }) { return <div className="fixed inset-0 z-50 flex justify-end bg-[#182236]/25 backdrop-blur-[2px]" onClick={onClose}><aside className="h-full w-full max-w-2xl overflow-y-auto bg-[#f7f8fa] shadow-2xl" onClick={event => event.stopPropagation()}><div className="sticky top-0 z-10 flex items-center justify-between border-b border-[#e3e7ed] bg-[#f7f8fa]/95 px-5 py-4 backdrop-blur sm:px-8"><button onClick={onClose} className="flex items-center gap-1 text-xs font-semibold text-[#7d899a] hover:text-[#1b2b45]"><ChevronLeft className="h-4 w-4" />Back to vault</button><button onClick={onClose} aria-label="Close details" className="rounded-lg p-2 text-[#8b95a5] hover:bg-white"><X className="h-4 w-4" /></button></div><div className="p-5 sm:p-8"><div className="mb-7 flex items-start justify-between gap-4"><div><div className="mb-3 flex items-center gap-2"><span className="rounded-lg bg-[#e8eef8] px-2 py-1 font-mono text-[10px] font-bold uppercase tracking-wide text-[#4f6e96]">{item.language}</span><span className="text-xs text-[#99a2af]">{item.category}</span></div><h1 className="text-3xl font-semibold tracking-[-0.04em] text-[#182236]">{item.title}</h1><p className="mt-2 text-xs text-[#8994a5]">Updated {formatDistanceToNow(new Date(item.updatedAt), { addSuffix: true })}</p></div><button onClick={onFavorite} className="rounded-xl border border-[#e1e6ed] bg-white p-3 text-[#aeb7c3] hover:text-[#d39b32]"><Star className={`h-4 w-4 ${item.favorite ? "fill-[#e2aa3b] text-[#e2aa3b]" : ""}`} /></button></div>{item.notes && <div className="mb-6 rounded-2xl bg-white p-5 text-sm leading-6 text-[#6e7c90] shadow-[0_5px_20px_rgba(28,36,52,0.03)]">{item.notes}</div>}<div className="mb-4 flex flex-wrap gap-1.5">{item.tags.split(",").filter(Boolean).map((tag: string) => <span key={tag} className="rounded-md bg-white px-2.5 py-1 text-[11px] text-[#718096] shadow-sm">#{tag.trim()}</span>)}</div><div className="mb-4 flex items-center justify-between"><span className="font-mono text-[10px] font-bold uppercase tracking-[0.18em] text-[#8b95a5]">Source code</span><button onClick={onCopy} className="flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-semibold text-[#55759e] hover:bg-white"><Clipboard className="h-3.5 w-3.5" />Copy</button></div><CodePreview code={item.code} /><div className="mt-5 flex gap-2"><Button onClick={onEdit} className="rounded-xl bg-[#1b2b45] hover:bg-[#263b5b]"><Edit3 className="mr-2 h-4 w-4" />Edit snippet</Button><Button variant="outline" onClick={onDelete} className="rounded-xl border-[#e3e7ed] text-[#c15d65] hover:bg-[#fff3f3]"><Trash2 className="mr-2 h-4 w-4" />Delete</Button></div></div></aside></div>; }
